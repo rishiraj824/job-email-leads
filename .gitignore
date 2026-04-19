@@ -3,5 +3,6 @@ credentials.json
 token.json
 agent.log
 fallback.csv
+processed_cache.json
 __pycache__/
 *.pyc

@@ -61,6 +61,7 @@ SHEET_HEADERS = [
 FALLBACK_CSV = "fallback.csv"
 SITE_REPO = os.path.expanduser("~/rishiraj824.github.io")
 SITE_JOBS_JSON = os.path.join(SITE_REPO, "assets", "jobs.json")
+CACHE_FILE = Path("processed_cache.json")
 
 
 # --- Auth ---
@@ -339,10 +340,15 @@ def get_or_create_sheet(gc):
     return ws
 
 
-def load_seen_emails(ws):
-    """Load all (sender, subject) pairs from sheet into a set for fast dedup."""
-    records = ws.get_all_values()
-    return {(row[11], row[10]) for row in records[1:] if len(row) >= 12}
+def load_cache():
+    """Load set of processed message ID hashes from local cache file."""
+    if CACHE_FILE.exists():
+        return set(json.loads(CACHE_FILE.read_text()))
+    return set()
+
+
+def save_cache(cache):
+    CACHE_FILE.write_text(json.dumps(list(cache)))
 
 
 def append_to_sheet(ws, extracted, email):
@@ -461,15 +467,13 @@ def run(draft_mode=False):
     candidates = batch_filter_subjects(claude, all_metadata)
     log.info("%d emails look job-related by subject", len(candidates))
 
-    seen = load_seen_emails(ws)
+    cache = load_cache()
     processed = 0
     new_site_jobs = []
     for meta in candidates:
-        if (meta["sender"], meta["subject"]) in seen:
-            log.info("Skipping duplicate: %s", meta["subject"])
-            mark_as_read(gmail, meta["id"])
+        if meta["id"] in cache:
+            log.info("Skipping cached: %s", meta["subject"])
             continue
-        seen.add((meta["sender"], meta["subject"]))
 
         log.info("Fetching full email: %s | %s", meta["sender"], meta["subject"])
         email = fetch_full_email(
@@ -480,12 +484,18 @@ def run(draft_mode=False):
         result = classify_and_extract(claude, email)
         if not result.get("is_job_related"):
             log.info("Not job-related after full read, skipping: %s", meta["subject"])
+            cache.add(meta["id"])
+            save_cache(cache)
             continue
         if not result.get("is_startup", True):
             log.info("Skipping big company: %s", result.get("company_name"))
+            cache.add(meta["id"])
+            save_cache(cache)
             continue
         if not result.get("single_company", True):
             log.info("Skipping multi-company email")
+            cache.add(meta["id"])
+            save_cache(cache)
             continue
 
         if draft_mode:
@@ -498,6 +508,8 @@ def run(draft_mode=False):
 
         append_to_sheet(ws, result, email)
         mark_as_read(gmail, email["id"])
+        cache.add(meta["id"])
+        save_cache(cache)
         processed += 1
         log.info("Done: %s - %s [%s]", result.get("company_name"), result.get("role"), result.get("status"))
 
