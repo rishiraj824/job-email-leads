@@ -191,11 +191,17 @@ def batch_filter_subjects(client, metadata):
         f'{i}: From={m["sender"]} | Subject={m["subject"]}'
         for i, m in enumerate(metadata)
     )
-    prompt = f"""You are filtering emails to find job-related ones.
+    prompt = f"""You are filtering emails to find genuine recruiter/hiring outreach.
 
-Return a JSON array of integer indices (0-based) for emails that are likely job-related:
-recruiter outreach, job application updates, interview invites, offers, rejections, or follow-ups.
-Be inclusive — when in doubt, include it.
+Return a JSON array of integer indices (0-based) ONLY for emails that are direct, personal recruiter outreach or hiring-related: a recruiter or hiring manager contacting the recipient about a specific job opportunity, interview invite, application update, offer, or rejection.
+
+EXCLUDE:
+- Product newsletters, launch announcements, or marketing emails (even from tech companies like Supabase, Linear, Vercel, etc.)
+- Job board digests or mass job listing emails
+- Any email that reads like a broadcast, newsletter, or product update
+- Emails where the sender is a no-reply or marketing address
+
+Be conservative — when in doubt, exclude it.
 
 Emails:
 {lines}
@@ -237,7 +243,7 @@ def classify_and_extract(client, email):
         "cache_control": {"type": "ephemeral"},
     }
     prompt = f"""Analyze this email and return a JSON object with these exact keys:
-- is_job_related (bool): true if recruiter outreach, application update, interview, offer, or rejection
+- is_job_related (bool): true ONLY if this is a direct, personal recruiter or hiring manager message about a specific job — outreach, application update, interview invite, offer, or rejection. false for newsletters, product updates, marketing blasts, or job board digests even if they mention hiring
 - is_startup (bool): true if the company is a startup or small/mid-size company. false for large enterprises or well-known big tech (e.g. Google, Meta, Apple, Amazon, Microsoft, Netflix, Uber, Airbnb, Salesforce, Oracle, IBM, Intel, Cisco, SAP, or any company with >10,000 employees)
 - single_company (bool): true if the email is from or about exactly one company. false if it promotes or lists multiple different companies (e.g. recruiter blast with several employers)
 - company_name (string)
