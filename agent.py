@@ -55,7 +55,7 @@ SCOPES = [
 SHEET_HEADERS = [
     "Date Received", "Company", "Role", "Status", "Pay",
     "Remote/Onsite", "Location", "LinkedIn/Website", "Team Info",
-    "Funding", "Email Subject", "Sender", "Summary", "Notes",
+    "Funding", "Email Subject", "Sender", "Summary", "Skills", "Notes",
 ]
 
 FALLBACK_CSV = "fallback.csv"
@@ -245,6 +245,7 @@ def classify_and_extract(client, email):
 - remote_or_onsite (string): "Remote", "Hybrid", "Onsite", or "Not mentioned"
 - location (string): city/country or "Not mentioned"
 - linkedin_or_website (string): any URL found, else "Not mentioned"
+- skills (string): comma-separated list of required skills/technologies mentioned, else "Not mentioned"
 - team_info (string): team or department, else "Not mentioned"
 - funding (string): funding stage/amount if mentioned, else "Not mentioned"
 - status (string): one of "Applied", "Interview", "Offer", "Rejected", "Follow-up", "Other"
@@ -352,6 +353,7 @@ def append_to_sheet(ws, extracted, email):
         email["subject"],
         email["sender"],
         extracted.get("summary", ""),
+        extracted.get("skills", ""),
         "",
     ]
     try:
@@ -500,6 +502,7 @@ def run(draft_mode=False):
             "location": result.get("location", ""),
             "linkedin_or_website": result.get("linkedin_or_website", ""),
             "funding": result.get("funding", ""),
+            "skills": result.get("skills", ""),
             "summary": result.get("summary", ""),
             # recruiter email intentionally excluded from public listing
         })
