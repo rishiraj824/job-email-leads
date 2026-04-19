@@ -85,8 +85,8 @@ def get_sheets_client():
 # --- Gmail helpers ---
 
 def fetch_message_metadata(service):
-    """Fetch only id, subject, sender for Important emails received today."""
-    after = datetime.now().strftime("%Y/%m/%d")
+    """Fetch only id, subject, sender for Important emails in last 7 days."""
+    after = (datetime.now() - timedelta(days=7)).strftime("%Y/%m/%d")
     query = f"label:important after:{after}"
     messages = []
     result = service.users().messages().list(
@@ -310,7 +310,8 @@ def publish_to_site(new_jobs):
     if not new_jobs:
         return
     jobs_path = Path(SITE_JOBS_JSON)
-    existing = json.loads(jobs_path.read_text()) if jobs_path.exists() else []
+    stored = json.loads(jobs_path.read_text()) if jobs_path.exists() else {}
+    existing = stored.get("jobs", []) if isinstance(stored, dict) else stored
 
     # deduplicate by company+role+date
     seen = {(j.get("company"), j.get("role"), j.get("date_received")) for j in existing}
@@ -325,7 +326,11 @@ def publish_to_site(new_jobs):
     if not added:
         return
 
-    jobs_path.write_text(json.dumps(existing, indent=2))
+    output = {
+        "last_updated": datetime.now().strftime("%B %d, %Y at %I:%M %p"),
+        "jobs": existing,
+    }
+    jobs_path.write_text(json.dumps(output, indent=2))
     log.info("Publishing %d new jobs to site", len(added))
     try:
         subprocess.run(["git", "add", "assets/jobs.json"], cwd=SITE_REPO, check=True)
