@@ -12,6 +12,7 @@ import base64
 import json
 import logging
 import csv
+import subprocess
 from datetime import datetime, timedelta
 from email import message_from_bytes
 from email.utils import parsedate_to_datetime
@@ -54,6 +55,8 @@ SHEET_HEADERS = [
 ]
 
 FALLBACK_CSV = "fallback.csv"
+SITE_REPO = os.path.expanduser("~/rishiraj824.github.io")
+SITE_JOBS_JSON = os.path.join(SITE_REPO, "assets", "jobs.json")
 
 
 # --- Auth ---
@@ -324,6 +327,42 @@ def write_fallback_csv(row):
         writer.writerow(row)
 
 
+# --- Publish to site ---
+
+def publish_to_site(new_jobs):
+    """Merge new jobs into assets/jobs.json in the Jekyll site and push."""
+    if not new_jobs:
+        return
+    jobs_path = Path(SITE_JOBS_JSON)
+    existing = json.loads(jobs_path.read_text()) if jobs_path.exists() else []
+
+    # deduplicate by company+role+date
+    seen = {(j.get("company"), j.get("role"), j.get("date_received")) for j in existing}
+    added = []
+    for job in new_jobs:
+        key = (job.get("company"), job.get("role"), job.get("date_received"))
+        if key not in seen:
+            existing.insert(0, job)
+            seen.add(key)
+            added.append(job)
+
+    if not added:
+        return
+
+    jobs_path.write_text(json.dumps(existing, indent=2))
+    log.info("Publishing %d new jobs to site", len(added))
+    try:
+        subprocess.run(["git", "add", "assets/jobs.json"], cwd=SITE_REPO, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", f"Add {len(added)} job lead(s) [{datetime.now().strftime('%Y-%m-%d')}]"],
+            cwd=SITE_REPO, check=True
+        )
+        subprocess.run(["git", "push", "origin", "master"], cwd=SITE_REPO, check=True)
+        log.info("Site updated and pushed")
+    except subprocess.CalledProcessError as e:
+        log.error("Git push to site failed: %s", e)
+
+
 # --- Main ---
 
 def run():
@@ -346,6 +385,7 @@ def run():
     log.info("%d emails look job-related by subject", len(candidates))
 
     processed = 0
+    new_site_jobs = []
     for meta in candidates:
         if is_duplicate(ws, meta["sender"], meta["subject"]):
             log.info("Skipping duplicate: %s", meta["subject"])
@@ -378,6 +418,20 @@ def run():
         processed += 1
         log.info("Done: %s - %s [%s]", result.get("company_name"), result.get("role"), result.get("status"))
 
+        new_site_jobs.append({
+            "date_received": email["date"],
+            "company": result.get("company_name", ""),
+            "role": result.get("role", ""),
+            "status": result.get("status", ""),
+            "pay": result.get("pay", ""),
+            "remote_or_onsite": result.get("remote_or_onsite", ""),
+            "location": result.get("location", ""),
+            "linkedin_or_website": result.get("linkedin_or_website", ""),
+            "funding": result.get("funding", ""),
+            "summary": result.get("summary", ""),
+        })
+
+    publish_to_site(new_site_jobs)
     log.info("Finished. Processed %d job emails.", processed)
 
 
