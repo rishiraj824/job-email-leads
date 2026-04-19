@@ -85,8 +85,8 @@ def get_sheets_client():
 # --- Gmail helpers ---
 
 def fetch_message_metadata(service):
-    """Fetch only id, subject, sender for all Important emails in last 30 days."""
-    after = (datetime.now() - timedelta(days=30)).strftime("%Y/%m/%d")
+    """Fetch only id, subject, sender for Important emails received today."""
+    after = datetime.now().strftime("%Y/%m/%d")
     query = f"label:important after:{after}"
     messages = []
     result = service.users().messages().list(
@@ -264,12 +264,10 @@ def get_or_create_sheet(gc):
     return ws
 
 
-def is_duplicate(ws, sender, subject):
+def load_seen_emails(ws):
+    """Load all (sender, subject) pairs from sheet into a set for fast dedup."""
     records = ws.get_all_values()
-    for row in records[1:]:
-        if len(row) >= 12 and row[11] == sender and row[10] == subject:
-            return True
-    return False
+    return {(row[11], row[10]) for row in records[1:] if len(row) >= 12}
 
 
 def append_to_sheet(ws, extracted, email):
@@ -362,13 +360,15 @@ def run():
     candidates = batch_filter_subjects(claude, all_metadata)
     log.info("%d emails look job-related by subject", len(candidates))
 
+    seen = load_seen_emails(ws)
     processed = 0
     new_site_jobs = []
     for meta in candidates:
-        if is_duplicate(ws, meta["sender"], meta["subject"]):
+        if (meta["sender"], meta["subject"]) in seen:
             log.info("Skipping duplicate: %s", meta["subject"])
             mark_as_read(gmail, meta["id"])
             continue
+        seen.add((meta["sender"], meta["subject"]))
 
         log.info("Fetching full email: %s | %s", meta["sender"], meta["subject"])
         email = fetch_full_email(
