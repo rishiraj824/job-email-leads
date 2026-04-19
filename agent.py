@@ -86,8 +86,8 @@ def get_sheets_client():
 # --- Gmail helpers ---
 
 def fetch_message_metadata(service):
-    """Fetch only id, subject, sender for Important emails in last 7 days."""
-    after = (datetime.now() - timedelta(days=7)).strftime("%Y/%m/%d")
+    """Fetch only id, subject, sender for Important emails in the past 24 hours."""
+    after = (datetime.now() - timedelta(days=1)).strftime("%Y/%m/%d")
     query = f"label:important after:{after}"
     messages = []
     result = service.users().messages().list(
