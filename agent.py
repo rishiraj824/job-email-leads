@@ -239,7 +239,7 @@ def classify_and_extract(client, email):
     prompt = f"""Analyze this email and return a JSON object with these exact keys:
 - is_job_related (bool): true if recruiter outreach, application update, interview, offer, or rejection
 - is_startup (bool): true if the company is a startup or small/mid-size company. false for large enterprises or well-known big tech (e.g. Google, Meta, Apple, Amazon, Microsoft, Netflix, Uber, Airbnb, Salesforce, Oracle, IBM, Intel, Cisco, SAP, or any company with >10,000 employees)
-- single_role (bool): true if the email is recruiting for exactly one specific role. false if it lists or mentions multiple different roles or positions
+- single_company (bool): true if the email is from or about exactly one company. false if it promotes or lists multiple different companies (e.g. recruiter blast with several employers)
 - company_name (string)
 - role (string)
 - pay (string): salary/range if mentioned, else "Not mentioned"
@@ -478,8 +478,8 @@ def run(draft_mode=False):
         if not result.get("is_startup", True):
             log.info("Skipping big company: %s", result.get("company_name"))
             continue
-        if not result.get("single_role", True):
-            log.info("Skipping multi-role email: %s", result.get("company_name"))
+        if not result.get("single_company", True):
+            log.info("Skipping multi-company email")
             continue
 
         if draft_mode:
