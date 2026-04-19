@@ -43,7 +43,6 @@ SHEETS_ID = os.getenv("GOOGLE_SHEETS_ID")
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
-    "https://www.googleapis.com/auth/gmail.compose",
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive.file",
 ]
@@ -51,7 +50,7 @@ SCOPES = [
 SHEET_HEADERS = [
     "Date Received", "Company", "Role", "Status", "Pay",
     "Remote/Onsite", "Location", "LinkedIn/Website", "Team Info",
-    "Funding", "Email Subject", "Sender", "Summary", "Draft Created", "Notes",
+    "Funding", "Email Subject", "Sender", "Summary", "Notes",
 ]
 
 FALLBACK_CSV = "fallback.csv"
@@ -164,17 +163,6 @@ def mark_as_read(service, msg_id):
     ).execute()
 
 
-def create_draft(service, thread_id, to, subject, body_text):
-    import email as emaillib
-    msg = emaillib.message.EmailMessage()
-    msg["To"] = to
-    msg["Subject"] = f"Re: {subject}" if not subject.startswith("Re:") else subject
-    msg.set_content(body_text)
-    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-    service.users().drafts().create(
-        userId="me", body={"message": {"raw": raw, "threadId": thread_id}}
-    ).execute()
-
 
 # --- Claude calls ---
 
@@ -217,19 +205,17 @@ Return only a JSON array of indices, e.g. [0, 3, 7]. No explanation."""
         return metadata  # fall back to processing all
 
 
-def classify_extract_and_reply(client, email):
-    """Single Sonnet call: extract job details AND generate draft reply."""
+def classify_and_extract(client, email):
+    """Single Sonnet call: classify and extract job details."""
     system = {
         "type": "text",
         "text": (
-            "You are an assistant that classifies job emails, extracts details, and writes draft replies. "
+            "You are an assistant that classifies job emails and extracts details. "
             "Always respond with valid JSON only, no markdown fences."
         ),
         "cache_control": {"type": "ephemeral"},
     }
-    prompt = f"""Analyze this email and return a single JSON object with these exact keys:
-
-Extraction fields:
+    prompt = f"""Analyze this email and return a JSON object with these exact keys:
 - is_job_related (bool): true if recruiter outreach, application update, interview, offer, or rejection
 - company_name (string)
 - role (string)
@@ -242,13 +228,6 @@ Extraction fields:
 - status (string): one of "Applied", "Interview", "Offer", "Rejected", "Follow-up", "Other"
 - summary (string): one sentence summary
 
-Reply field:
-- draft_reply (string): a concise, warm, professional reply body (no subject line, no preamble).
-  Tailor to the status — confirm interest for Interview, express enthusiasm for Offer,
-  thank graciously for Rejected, follow up for Applied/Follow-up.
-  End with "Best,\\n[Your Name]"
-  If not job-related, set to "".
-
 Email:
 From: {email['sender']}
 Subject: {email['subject']}
@@ -260,7 +239,7 @@ Date: {email['date']}
         try:
             resp = client.messages.create(
                 model="claude-sonnet-4-6",
-                max_tokens=1536,
+                max_tokens=1024,
                 system=[system],
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -270,7 +249,7 @@ Date: {email['date']}
                 prompt += "\n\nIMPORTANT: Return only raw JSON, no explanation, no code fences."
                 continue
             log.error("Failed to parse Claude JSON for: %s", email["subject"])
-            return {"is_job_related": False, "draft_reply": ""}
+            return {"is_job_related": False}
 
 
 # --- Google Sheets ---
@@ -293,7 +272,7 @@ def is_duplicate(ws, sender, subject):
     return False
 
 
-def append_to_sheet(ws, extracted, email, draft_created):
+def append_to_sheet(ws, extracted, email):
     row = [
         email["date"],
         extracted.get("company_name", ""),
@@ -308,7 +287,6 @@ def append_to_sheet(ws, extracted, email, draft_created):
         email["subject"],
         email["sender"],
         extracted.get("summary", ""),
-        "Yes" if draft_created else "No",
         "",
     ]
     try:
@@ -398,22 +376,12 @@ def run():
             meta["subject"], meta["sender"], meta["date"]
         )
 
-        result = classify_extract_and_reply(claude, email)
+        result = classify_and_extract(claude, email)
         if not result.get("is_job_related"):
             log.info("Not job-related after full read, skipping: %s", meta["subject"])
             continue
 
-        draft_created = False
-        reply_text = result.get("draft_reply", "")
-        if reply_text:
-            try:
-                create_draft(gmail, email["thread_id"], email["sender"], email["subject"], reply_text)
-                draft_created = True
-                log.info("Draft created for: %s - %s", result.get("company_name"), result.get("role"))
-            except Exception as e:
-                log.error("Draft creation failed: %s", e)
-
-        append_to_sheet(ws, result, email, draft_created)
+        append_to_sheet(ws, result, email)
         mark_as_read(gmail, email["id"])
         processed += 1
         log.info("Done: %s - %s [%s]", result.get("company_name"), result.get("role"), result.get("status"))
