@@ -13,6 +13,7 @@ import json
 import logging
 import csv
 import subprocess
+import time
 from datetime import datetime, timedelta
 from email import message_from_bytes
 from email.utils import parsedate_to_datetime
@@ -186,23 +187,28 @@ Emails:
 
 Return only a JSON array of indices, e.g. [0, 3, 7]. No explanation."""
 
-    resp = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=1024,
-        system=[{
-            "type": "text",
-            "text": "You filter email subjects. Return only valid JSON arrays.",
-            "cache_control": {"type": "ephemeral"},
-        }],
-        messages=[{"role": "user", "content": prompt}],
-    )
-    text = resp.content[0].text.strip()
-    try:
-        indices = json.loads(text)
-        return [metadata[i] for i in indices if 0 <= i < len(metadata)]
-    except (json.JSONDecodeError, IndexError):
-        log.error("Failed to parse subject filter response: %s", text)
-        return metadata  # fall back to processing all
+    for attempt in range(4):
+        try:
+            resp = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=1024,
+                system=[{
+                    "type": "text",
+                    "text": "You filter email subjects. Return only valid JSON arrays.",
+                    "cache_control": {"type": "ephemeral"},
+                }],
+                messages=[{"role": "user", "content": prompt}],
+            )
+            indices = json.loads(resp.content[0].text.strip())
+            return [metadata[i] for i in indices if 0 <= i < len(metadata)]
+        except (json.JSONDecodeError, IndexError):
+            log.error("Failed to parse subject filter response, using all")
+            return metadata
+        except anthropic.InternalServerError:
+            wait = 2 ** attempt
+            log.warning("Anthropic 500 on subject filter, retrying in %ds...", wait)
+            time.sleep(wait)
+    return metadata  # fall back to processing all on persistent failure
 
 
 def classify_and_extract(client, email):
@@ -235,7 +241,7 @@ Date: {email['date']}
 
 {email['body']}
 """
-    for attempt in range(2):
+    for attempt in range(4):
         try:
             resp = client.messages.create(
                 model="claude-sonnet-4-6",
@@ -247,9 +253,15 @@ Date: {email['date']}
         except json.JSONDecodeError:
             if attempt == 0:
                 prompt += "\n\nIMPORTANT: Return only raw JSON, no explanation, no code fences."
-                continue
-            log.error("Failed to parse Claude JSON for: %s", email["subject"])
-            return {"is_job_related": False}
+            else:
+                log.error("Failed to parse Claude JSON for: %s", email["subject"])
+                return {"is_job_related": False}
+        except anthropic.InternalServerError:
+            wait = 2 ** attempt
+            log.warning("Anthropic 500 error, retrying in %ds...", wait)
+            time.sleep(wait)
+    log.error("Giving up on: %s", email["subject"])
+    return {"is_job_related": False}
 
 
 # --- Google Sheets ---
@@ -402,6 +414,7 @@ def run():
             "linkedin_or_website": result.get("linkedin_or_website", ""),
             "funding": result.get("funding", ""),
             "summary": result.get("summary", ""),
+            # recruiter email intentionally excluded from public listing
         })
 
     publish_to_site(new_site_jobs)
