@@ -317,6 +317,15 @@ def write_fallback_csv(row):
 
 # --- Publish to site ---
 
+def _parse_job_date(date_str):
+    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S", "%a, %d %b %Y %H:%M:%S %z", "%a, %d %b %Y %H:%M:%S"):
+        try:
+            return datetime.strptime(date_str[:25], fmt[:len(date_str[:25])]).replace(tzinfo=None)
+        except ValueError:
+            continue
+    return datetime.min  # keep if unparseable
+
+
 def publish_to_site(new_jobs):
     """Merge new jobs into assets/jobs.json in the Jekyll site and push."""
     if not new_jobs:
@@ -335,7 +344,15 @@ def publish_to_site(new_jobs):
             seen.add(key)
             added.append(job)
 
-    if not added:
+    # drop jobs older than 90 days
+    cutoff = datetime.now() - timedelta(days=90)
+    before = len(existing)
+    existing = [j for j in existing if _parse_job_date(j.get("date_received", "")) >= cutoff]
+    dropped = before - len(existing)
+    if dropped:
+        log.info("Removed %d jobs older than 90 days", dropped)
+
+    if not added and not dropped:
         return
 
     output = {
@@ -405,6 +422,7 @@ def run():
 
         new_site_jobs.append({
             "date_received": email["date"],
+            "date_added": datetime.now().strftime("%B %d, %Y"),
             "company": result.get("company_name", ""),
             "role": result.get("role", ""),
             "status": result.get("status", ""),
