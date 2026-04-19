@@ -1,10 +1,13 @@
 """
 Job Application Email Agent
-- Reads Gmail emails from Important label (last 30 days)
+- Reads Gmail emails from Important label (last 7 days)
 - Pre-filters by subject using a single batch Claude call
 - Fetches full body only for job-related emails
-- Extracts details and creates Gmail draft replies
-- Appends rows to Google Sheets
+- Extracts details and logs to Google Sheets + publishes to site
+
+Optional draft mode (--draft flag):
+- Generates and saves Gmail draft replies for each job email
+- Not part of the scheduled run; invoke manually when needed
 """
 
 import os
@@ -44,6 +47,7 @@ SHEETS_ID = os.getenv("GOOGLE_SHEETS_ID")
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/gmail.compose",
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive.file",
 ]
@@ -164,6 +168,17 @@ def mark_as_read(service, msg_id):
     ).execute()
 
 
+def create_draft(service, thread_id, to, subject, body_text):
+    import email as emaillib
+    msg = emaillib.message.EmailMessage()
+    msg["To"] = to
+    msg["Subject"] = f"Re: {subject}" if not subject.startswith("Re:") else subject
+    msg.set_content(body_text)
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    service.users().drafts().create(
+        userId="me", body={"message": {"raw": raw, "threadId": thread_id}}
+    ).execute()
+
 
 # --- Claude calls ---
 
@@ -263,6 +278,45 @@ Date: {email['date']}
             time.sleep(wait)
     log.error("Giving up on: %s", email["subject"])
     return {"is_job_related": False}
+
+
+def generate_reply(client, email, extracted):
+    """Generate a draft reply for a job email. Used only in --draft mode."""
+    status = extracted.get("status", "Other")
+    company = extracted.get("company_name", "the company")
+    role = extracted.get("role", "the role")
+    guidance = {
+        "Interview": f"Confirm strong interest in the {role} role at {company} and ask for scheduling options.",
+        "Offer": f"Express genuine enthusiasm for the offer from {company} for {role} and indicate you will review the details.",
+        "Rejected": f"Thank {company} graciously for their time, keep the door open for future opportunities.",
+        "Applied": f"Follow up on the application for {role} at {company}, express continued interest.",
+        "Follow-up": f"Respond to the follow-up from {company} regarding {role}, confirm interest.",
+    }.get(status, f"Reply professionally to this email from {company} about {role}.")
+
+    resp = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=512,
+        system=[{
+            "type": "text",
+            "text": "You are a professional job seeker writing concise, warm email replies. Write the reply body only — no subject line, no preamble.",
+            "cache_control": {"type": "ephemeral"},
+        }],
+        messages=[{"role": "user", "content": f"""Write a reply to this job email.
+
+Context: Company: {company} | Role: {role} | Status: {status}
+Instruction: {guidance}
+
+Original email:
+From: {email['sender']}
+Subject: {email['subject']}
+
+{email['body'][:2000]}
+
+End with:
+Best,
+Rishi"""}],
+    )
+    return resp.content[0].text.strip()
 
 
 # --- Google Sheets ---
@@ -376,18 +430,21 @@ def publish_to_site(new_jobs):
 
 # --- Main ---
 
-def run():
+def run(draft_mode=False):
     if not ANTHROPIC_API_KEY:
         raise ValueError("ANTHROPIC_API_KEY not set in .env")
     if not SHEETS_ID:
         raise ValueError("GOOGLE_SHEETS_ID not set in .env")
+
+    if draft_mode:
+        log.info("Draft mode enabled — will generate and save Gmail drafts")
 
     claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     gmail = get_gmail_service()
     gc = get_sheets_client()
     ws = get_or_create_sheet(gc)
 
-    log.info("Fetching email metadata from Important label (last 30 days)...")
+    log.info("Fetching email metadata from Important label (last 7 days)...")
     all_metadata = fetch_message_metadata(gmail)
     log.info("Found %d emails total", len(all_metadata))
 
@@ -419,6 +476,14 @@ def run():
             log.info("Skipping big company: %s", result.get("company_name"))
             continue
 
+        if draft_mode:
+            try:
+                reply_text = generate_reply(claude, email, result)
+                create_draft(gmail, email["thread_id"], email["sender"], email["subject"], reply_text)
+                log.info("Draft created for: %s - %s", result.get("company_name"), result.get("role"))
+            except Exception as e:
+                log.error("Draft creation failed: %s", e)
+
         append_to_sheet(ws, result, email)
         mark_as_read(gmail, email["id"])
         processed += 1
@@ -444,4 +509,8 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    import argparse
+    parser = argparse.ArgumentParser(description="Job Email Agent")
+    parser.add_argument("--draft", action="store_true", help="Generate Gmail draft replies for each job email")
+    args = parser.parse_args()
+    run(draft_mode=args.draft)
