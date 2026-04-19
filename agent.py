@@ -223,6 +223,7 @@ def classify_and_extract(client, email):
     }
     prompt = f"""Analyze this email and return a JSON object with these exact keys:
 - is_job_related (bool): true if recruiter outreach, application update, interview, offer, or rejection
+- is_startup (bool): true if the company is a startup or small/mid-size company. false for large enterprises or well-known big tech (e.g. Google, Meta, Apple, Amazon, Microsoft, Netflix, Uber, Airbnb, Salesforce, Oracle, IBM, Intel, Cisco, SAP, or any company with >10,000 employees)
 - company_name (string)
 - role (string)
 - pay (string): salary/range if mentioned, else "Not mentioned"
@@ -413,6 +414,9 @@ def run():
         result = classify_and_extract(claude, email)
         if not result.get("is_job_related"):
             log.info("Not job-related after full read, skipping: %s", meta["subject"])
+            continue
+        if not result.get("is_startup", True):
+            log.info("Skipping big company: %s", result.get("company_name"))
             continue
 
         append_to_sheet(ws, result, email)
