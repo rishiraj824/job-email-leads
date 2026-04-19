@@ -1,0 +1,7 @@
+.env
+credentials.json
+token.json
+agent.log
+fallback.csv
+__pycache__/
+*.pyc

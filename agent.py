@@ -1,0 +1,385 @@
+"""
+Job Application Email Agent
+- Reads Gmail emails from Important label (last 30 days)
+- Pre-filters by subject using a single batch Claude call
+- Fetches full body only for job-related emails
+- Extracts details and creates Gmail draft replies
+- Appends rows to Google Sheets
+"""
+
+import os
+import base64
+import json
+import logging
+import csv
+from datetime import datetime, timedelta
+from email import message_from_bytes
+from email.utils import parsedate_to_datetime
+from pathlib import Path
+
+from dotenv import load_dotenv
+import anthropic
+import gspread
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+
+load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[
+        logging.FileHandler("agent.log"),
+        logging.StreamHandler(),
+    ],
+)
+log = logging.getLogger(__name__)
+
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+SHEETS_ID = os.getenv("GOOGLE_SHEETS_ID")
+
+SCOPES = [
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/gmail.compose",
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive.file",
+]
+
+SHEET_HEADERS = [
+    "Date Received", "Company", "Role", "Status", "Pay",
+    "Remote/Onsite", "Location", "LinkedIn/Website", "Team Info",
+    "Funding", "Email Subject", "Sender", "Summary", "Draft Created", "Notes",
+]
+
+FALLBACK_CSV = "fallback.csv"
+
+
+# --- Auth ---
+
+def get_gmail_service():
+    creds = None
+    if Path("token.json").exists():
+        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
+            creds = flow.run_local_server(port=0)
+        with open("token.json", "w") as f:
+            f.write(creds.to_json())
+    return build("gmail", "v1", credentials=creds)
+
+
+def get_sheets_client():
+    return gspread.oauth(
+        credentials_filename="credentials.json",
+        authorized_user_filename="token.json",
+    )
+
+
+# --- Gmail helpers ---
+
+def fetch_message_metadata(service):
+    """Fetch only id, subject, sender for all Important emails in last 30 days."""
+    after = (datetime.now() - timedelta(days=30)).strftime("%Y/%m/%d")
+    query = f"label:important after:{after}"
+    messages = []
+    result = service.users().messages().list(
+        userId="me", q=query, maxResults=500
+    ).execute()
+    messages.extend(result.get("messages", []))
+    while "nextPageToken" in result:
+        result = service.users().messages().list(
+            userId="me", q=query, maxResults=500, pageToken=result["nextPageToken"]
+        ).execute()
+        messages.extend(result.get("messages", []))
+
+    metadata = []
+    for msg in messages:
+        meta = service.users().messages().get(
+            userId="me", id=msg["id"], format="metadata",
+            metadataHeaders=["Subject", "From", "Date"]
+        ).execute()
+        headers = {h["name"]: h["value"] for h in meta.get("payload", {}).get("headers", [])}
+        metadata.append({
+            "id": msg["id"],
+            "thread_id": meta.get("threadId"),
+            "subject": headers.get("Subject", "(no subject)"),
+            "sender": headers.get("From", ""),
+            "date": headers.get("Date", ""),
+        })
+    return metadata
+
+
+def fetch_full_email(service, msg_id, thread_id, subject, sender, date):
+    """Fetch full body for a single email."""
+    full = service.users().messages().get(
+        userId="me", id=msg_id, format="raw"
+    ).execute()
+    raw = base64.urlsafe_b64decode(full["raw"])
+    parsed = message_from_bytes(raw)
+    body = extract_body(parsed)
+    try:
+        date_parsed = parsedate_to_datetime(date).isoformat()
+    except Exception:
+        date_parsed = date
+    return {
+        "id": msg_id,
+        "thread_id": thread_id,
+        "subject": subject,
+        "sender": sender,
+        "date": date_parsed,
+        "body": body[:6000],
+    }
+
+
+def extract_body(msg):
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() == "text/plain":
+                payload = part.get_payload(decode=True)
+                if payload:
+                    return payload.decode("utf-8", errors="replace")
+        for part in msg.walk():
+            if part.get_content_type() == "text/html":
+                payload = part.get_payload(decode=True)
+                if payload:
+                    return payload.decode("utf-8", errors="replace")
+    else:
+        payload = msg.get_payload(decode=True)
+        if payload:
+            return payload.decode("utf-8", errors="replace")
+    return ""
+
+
+def mark_as_read(service, msg_id):
+    service.users().messages().modify(
+        userId="me", id=msg_id, body={"removeLabelIds": ["UNREAD"]}
+    ).execute()
+
+
+def create_draft(service, thread_id, to, subject, body_text):
+    import email as emaillib
+    msg = emaillib.message.EmailMessage()
+    msg["To"] = to
+    msg["Subject"] = f"Re: {subject}" if not subject.startswith("Re:") else subject
+    msg.set_content(body_text)
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    service.users().drafts().create(
+        userId="me", body={"message": {"raw": raw, "threadId": thread_id}}
+    ).execute()
+
+
+# --- Claude calls ---
+
+def batch_filter_subjects(client, metadata):
+    """Single Claude call to identify which emails are job-related by subject+sender."""
+    if not metadata:
+        return []
+
+    lines = "\n".join(
+        f'{i}: From={m["sender"]} | Subject={m["subject"]}'
+        for i, m in enumerate(metadata)
+    )
+    prompt = f"""You are filtering emails to find job-related ones.
+
+Return a JSON array of integer indices (0-based) for emails that are likely job-related:
+recruiter outreach, job application updates, interview invites, offers, rejections, or follow-ups.
+Be inclusive — when in doubt, include it.
+
+Emails:
+{lines}
+
+Return only a JSON array of indices, e.g. [0, 3, 7]. No explanation."""
+
+    resp = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=1024,
+        system=[{
+            "type": "text",
+            "text": "You filter email subjects. Return only valid JSON arrays.",
+            "cache_control": {"type": "ephemeral"},
+        }],
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text = resp.content[0].text.strip()
+    try:
+        indices = json.loads(text)
+        return [metadata[i] for i in indices if 0 <= i < len(metadata)]
+    except (json.JSONDecodeError, IndexError):
+        log.error("Failed to parse subject filter response: %s", text)
+        return metadata  # fall back to processing all
+
+
+def classify_extract_and_reply(client, email):
+    """Single Sonnet call: extract job details AND generate draft reply."""
+    system = {
+        "type": "text",
+        "text": (
+            "You are an assistant that classifies job emails, extracts details, and writes draft replies. "
+            "Always respond with valid JSON only, no markdown fences."
+        ),
+        "cache_control": {"type": "ephemeral"},
+    }
+    prompt = f"""Analyze this email and return a single JSON object with these exact keys:
+
+Extraction fields:
+- is_job_related (bool): true if recruiter outreach, application update, interview, offer, or rejection
+- company_name (string)
+- role (string)
+- pay (string): salary/range if mentioned, else "Not mentioned"
+- remote_or_onsite (string): "Remote", "Hybrid", "Onsite", or "Not mentioned"
+- location (string): city/country or "Not mentioned"
+- linkedin_or_website (string): any URL found, else "Not mentioned"
+- team_info (string): team or department, else "Not mentioned"
+- funding (string): funding stage/amount if mentioned, else "Not mentioned"
+- status (string): one of "Applied", "Interview", "Offer", "Rejected", "Follow-up", "Other"
+- summary (string): one sentence summary
+
+Reply field:
+- draft_reply (string): a concise, warm, professional reply body (no subject line, no preamble).
+  Tailor to the status — confirm interest for Interview, express enthusiasm for Offer,
+  thank graciously for Rejected, follow up for Applied/Follow-up.
+  End with "Best,\\n[Your Name]"
+  If not job-related, set to "".
+
+Email:
+From: {email['sender']}
+Subject: {email['subject']}
+Date: {email['date']}
+
+{email['body']}
+"""
+    for attempt in range(2):
+        try:
+            resp = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=1536,
+                system=[system],
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return json.loads(resp.content[0].text.strip())
+        except json.JSONDecodeError:
+            if attempt == 0:
+                prompt += "\n\nIMPORTANT: Return only raw JSON, no explanation, no code fences."
+                continue
+            log.error("Failed to parse Claude JSON for: %s", email["subject"])
+            return {"is_job_related": False, "draft_reply": ""}
+
+
+# --- Google Sheets ---
+
+def get_or_create_sheet(gc):
+    wb = gc.open_by_key(SHEETS_ID)
+    try:
+        ws = wb.worksheet("Job Applications")
+    except gspread.WorksheetNotFound:
+        ws = wb.add_worksheet("Job Applications", rows=1000, cols=len(SHEET_HEADERS))
+        ws.append_row(SHEET_HEADERS)
+    return ws
+
+
+def is_duplicate(ws, sender, subject):
+    records = ws.get_all_values()
+    for row in records[1:]:
+        if len(row) >= 12 and row[11] == sender and row[10] == subject:
+            return True
+    return False
+
+
+def append_to_sheet(ws, extracted, email, draft_created):
+    row = [
+        email["date"],
+        extracted.get("company_name", ""),
+        extracted.get("role", ""),
+        extracted.get("status", ""),
+        extracted.get("pay", ""),
+        extracted.get("remote_or_onsite", ""),
+        extracted.get("location", ""),
+        extracted.get("linkedin_or_website", ""),
+        extracted.get("team_info", ""),
+        extracted.get("funding", ""),
+        email["subject"],
+        email["sender"],
+        extracted.get("summary", ""),
+        "Yes" if draft_created else "No",
+        "",
+    ]
+    try:
+        ws.append_row(row)
+    except Exception as e:
+        log.warning("Sheets append failed, writing to fallback CSV: %s", e)
+        write_fallback_csv(row)
+
+
+def write_fallback_csv(row):
+    write_header = not Path(FALLBACK_CSV).exists()
+    with open(FALLBACK_CSV, "a", newline="") as f:
+        writer = csv.writer(f)
+        if write_header:
+            writer.writerow(SHEET_HEADERS)
+        writer.writerow(row)
+
+
+# --- Main ---
+
+def run():
+    if not ANTHROPIC_API_KEY:
+        raise ValueError("ANTHROPIC_API_KEY not set in .env")
+    if not SHEETS_ID:
+        raise ValueError("GOOGLE_SHEETS_ID not set in .env")
+
+    claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    gmail = get_gmail_service()
+    gc = get_sheets_client()
+    ws = get_or_create_sheet(gc)
+
+    log.info("Fetching email metadata from Important label (last 30 days)...")
+    all_metadata = fetch_message_metadata(gmail)
+    log.info("Found %d emails total", len(all_metadata))
+
+    log.info("Batch filtering subjects with Claude Haiku...")
+    candidates = batch_filter_subjects(claude, all_metadata)
+    log.info("%d emails look job-related by subject", len(candidates))
+
+    processed = 0
+    for meta in candidates:
+        if is_duplicate(ws, meta["sender"], meta["subject"]):
+            log.info("Skipping duplicate: %s", meta["subject"])
+            mark_as_read(gmail, meta["id"])
+            continue
+
+        log.info("Fetching full email: %s | %s", meta["sender"], meta["subject"])
+        email = fetch_full_email(
+            gmail, meta["id"], meta["thread_id"],
+            meta["subject"], meta["sender"], meta["date"]
+        )
+
+        result = classify_extract_and_reply(claude, email)
+        if not result.get("is_job_related"):
+            log.info("Not job-related after full read, skipping: %s", meta["subject"])
+            continue
+
+        draft_created = False
+        reply_text = result.get("draft_reply", "")
+        if reply_text:
+            try:
+                create_draft(gmail, email["thread_id"], email["sender"], email["subject"], reply_text)
+                draft_created = True
+                log.info("Draft created for: %s - %s", result.get("company_name"), result.get("role"))
+            except Exception as e:
+                log.error("Draft creation failed: %s", e)
+
+        append_to_sheet(ws, result, email, draft_created)
+        mark_as_read(gmail, email["id"])
+        processed += 1
+        log.info("Done: %s - %s [%s]", result.get("company_name"), result.get("role"), result.get("status"))
+
+    log.info("Finished. Processed %d job emails.", processed)
+
+
+if __name__ == "__main__":
+    run()
