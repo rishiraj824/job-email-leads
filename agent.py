@@ -91,13 +91,11 @@ def get_sheets_client():
 # --- Gmail helpers ---
 
 def fetch_message_metadata(service):
-    """Fetch only id, subject, sender for Important emails in the past 7 days."""
+    """Fetch subject/sender for Important emails in the past 7 days using batch requests."""
     after = (datetime.now() - timedelta(days=7)).strftime("%Y/%m/%d")
     query = f"label:important after:{after}"
     messages = []
-    result = service.users().messages().list(
-        userId="me", q=query, maxResults=500
-    ).execute()
+    result = service.users().messages().list(userId="me", q=query, maxResults=500).execute()
     messages.extend(result.get("messages", []))
     while "nextPageToken" in result:
         result = service.users().messages().list(
@@ -105,20 +103,45 @@ def fetch_message_metadata(service):
         ).execute()
         messages.extend(result.get("messages", []))
 
+    log.info("Fetching metadata for %d messages...", len(messages))
+
+    # load cache to skip already-processed IDs before any API calls
+    cache = load_cache()
+    messages = [m for m in messages if m["id"] not in cache]
+    log.info("%d messages not yet in cache", len(messages))
+
     metadata = []
-    for msg in messages:
-        meta = service.users().messages().get(
-            userId="me", id=msg["id"], format="metadata",
-            metadataHeaders=["Subject", "From", "Date"]
-        ).execute()
-        headers = {h["name"]: h["value"] for h in meta.get("payload", {}).get("headers", [])}
-        metadata.append({
-            "id": msg["id"],
-            "thread_id": meta.get("threadId"),
-            "subject": headers.get("Subject", "(no subject)"),
-            "sender": headers.get("From", ""),
-            "date": headers.get("Date", ""),
-        })
+    # batch in chunks of 100 (Gmail batch limit)
+    for i in range(0, len(messages), 100):
+        chunk = messages[i:i + 100]
+        batch = service.new_batch_http_request()
+        results = {}
+
+        def make_callback(msg_id):
+            def callback(request_id, response, exception):
+                if exception:
+                    log.warning("Batch metadata error for %s: %s", msg_id, exception)
+                    return
+                headers = {h["name"]: h["value"] for h in response.get("payload", {}).get("headers", [])}
+                results[msg_id] = {
+                    "id": msg_id,
+                    "thread_id": response.get("threadId"),
+                    "subject": headers.get("Subject", "(no subject)"),
+                    "sender": headers.get("From", ""),
+                    "date": headers.get("Date", ""),
+                }
+            return callback
+
+        for msg in chunk:
+            batch.add(
+                service.users().messages().get(
+                    userId="me", id=msg["id"], format="metadata",
+                    metadataHeaders=["Subject", "From", "Date"]
+                ),
+                callback=make_callback(msg["id"])
+            )
+        batch.execute()
+        metadata.extend(results.values())
     return metadata
 
 
@@ -471,9 +494,6 @@ def run(draft_mode=False):
     processed = 0
     new_site_jobs = []
     for meta in candidates:
-        if meta["id"] in cache:
-            log.info("Skipping cached: %s", meta["subject"])
-            continue
 
         log.info("Fetching full email: %s | %s", meta["sender"], meta["subject"])
         email = fetch_full_email(
