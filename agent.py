@@ -427,15 +427,17 @@ def publish_to_site(new_jobs):
     stored = json.loads(jobs_path.read_text()) if jobs_path.exists() else {}
     existing = stored.get("jobs", []) if isinstance(stored, dict) else stored
 
-    # deduplicate by company+role+date
-    seen = {(j.get("company"), j.get("role"), j.get("date_received")) for j in existing}
+    # deduplicate by company+role — keep first entry only, ignore follow-ups
+    seen_company_role = {(j.get("company"), j.get("role")) for j in existing}
     added = []
     for job in new_jobs:
-        key = (job.get("company"), job.get("role"), job.get("date_received"))
-        if key not in seen:
+        key = (job.get("company"), job.get("role"))
+        if key not in seen_company_role:
             existing.insert(0, job)
-            seen.add(key)
+            seen_company_role.add(key)
             added.append(job)
+        else:
+            log.info("Skipping follow-up for existing listing: %s - %s", job.get("company"), job.get("role"))
 
     # drop jobs older than 90 days
     cutoff = datetime.now() - timedelta(days=90)
