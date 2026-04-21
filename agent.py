@@ -90,9 +90,9 @@ def get_sheets_client():
 
 # --- Gmail helpers ---
 
-def fetch_message_metadata(service):
-    """Fetch subject/sender for Important emails in the past 7 days using batch requests."""
-    after = (datetime.now() - timedelta(days=7)).strftime("%Y/%m/%d")
+def fetch_message_metadata(service, days=1):
+    """Fetch subject/sender for Important emails in the past N days using batch requests."""
+    after = (datetime.now() - timedelta(days=days)).strftime("%Y/%m/%d")
     query = f"label:important after:{after}"
     messages = []
     result = service.users().messages().list(userId="me", q=query, maxResults=500).execute()
@@ -439,8 +439,8 @@ def publish_to_site(new_jobs):
         else:
             log.info("Skipping follow-up for existing listing: %s - %s", job.get("company"), job.get("role"))
 
-    # drop jobs older than 90 days
-    cutoff = datetime.now() - timedelta(days=90)
+    # drop jobs older than 30 days
+    cutoff = datetime.now() - timedelta(days=30)
     before = len(existing)
     existing = [j for j in existing if _parse_job_date(j.get("date_received", "")) >= cutoff]
     dropped = before - len(existing)
@@ -470,7 +470,7 @@ def publish_to_site(new_jobs):
 
 # --- Main ---
 
-def run(draft_mode=False):
+def run(draft_mode=False, days=1):
     if not ANTHROPIC_API_KEY:
         raise ValueError("ANTHROPIC_API_KEY not set in .env")
     if not SHEETS_ID:
@@ -484,8 +484,8 @@ def run(draft_mode=False):
     gc = get_sheets_client()
     ws = get_or_create_sheet(gc)
 
-    log.info("Fetching email metadata from Important label (last 7 days)...")
-    all_metadata = fetch_message_metadata(gmail)
+    log.info("Fetching email metadata from Important label (last %d days)...", days)
+    all_metadata = fetch_message_metadata(gmail, days=days)
     log.info("Found %d emails total", len(all_metadata))
 
     log.info("Batch filtering subjects with Claude Haiku...")
@@ -535,6 +535,20 @@ def run(draft_mode=False):
         processed += 1
         log.info("Done: %s - %s [%s]", result.get("company_name"), result.get("role"), result.get("status"))
 
+        # parse "Display Name <email@domain>" from sender header
+        raw_sender = email["sender"]
+        if "<" in raw_sender and ">" in raw_sender:
+            sender_name_part = raw_sender[:raw_sender.index("<")].strip().strip('"')
+            sender_email_part = raw_sender[raw_sender.index("<")+1:raw_sender.index(">")].strip()
+        else:
+            sender_name_part = ""
+            sender_email_part = raw_sender.strip()
+
+        claude_name = result.get("recruiter_name", "")
+        if claude_name in ("", "Not mentioned"):
+            claude_name = ""
+        recruiter_name = claude_name or sender_name_part or ""
+
         new_site_jobs.append({
             "date_received": email["date"],
             "date_added": datetime.now().strftime("%B %d, %Y"),
@@ -547,9 +561,9 @@ def run(draft_mode=False):
             "linkedin_or_website": result.get("linkedin_or_website", ""),
             "funding": result.get("funding", ""),
             "skills": result.get("skills", ""),
-            "recruiter_email": email["sender"],
+            "recruiter_name": recruiter_name,
+            "recruiter_email": sender_email_part,
             "summary": result.get("summary", ""),
-            # recruiter email intentionally excluded from public listing
         })
 
     publish_to_site(new_site_jobs)
@@ -560,5 +574,6 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Job Email Agent")
     parser.add_argument("--draft", action="store_true", help="Generate Gmail draft replies for each job email")
+    parser.add_argument("--days", type=int, default=1, help="How many days back to fetch emails (default: 1)")
     args = parser.parse_args()
-    run(draft_mode=args.draft)
+    run(draft_mode=args.draft, days=args.days)
