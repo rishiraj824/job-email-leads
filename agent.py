@@ -547,6 +547,7 @@ def run(draft_mode=False):
             "linkedin_or_website": result.get("linkedin_or_website", ""),
             "funding": result.get("funding", ""),
             "skills": result.get("skills", ""),
+            "recruiter_email": email["sender"],
             "summary": result.get("summary", ""),
             # recruiter email intentionally excluded from public listing
         })
