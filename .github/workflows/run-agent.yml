@@ -58,10 +58,16 @@ jobs:
       - name: Run agent
         run: python agent.py --days 1
 
-      - name: Commit updated cache and token to agent repo
+      - name: Save refreshed token back to secret
         run: |
-          git add -f processed_cache.json token.json
-          git diff --staged --quiet || git commit -m "chore: update cache and token [skip ci]"
+          gh secret set GOOGLE_TOKEN_JSON --repo rishiraj824/job-email-leads --body "$(cat token.json)"
+        env:
+          GH_TOKEN: ${{ secrets.SITE_DEPLOY_TOKEN }}
+
+      - name: Commit updated cache to agent repo
+        run: |
+          git add -f processed_cache.json
+          git diff --staged --quiet || git commit -m "chore: update cache [skip ci]"
           git push
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
