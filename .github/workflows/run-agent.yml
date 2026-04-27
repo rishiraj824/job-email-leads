@@ -1,0 +1,63 @@
+name: Run Email Agent
+
+on:
+  schedule:
+    - cron: '0 15 * * *'  # 8am PDT (UTC-7)
+  workflow_dispatch:       # allow manual trigger from GitHub UI
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout agent repo
+        uses: actions/checkout@v4
+
+      - name: Checkout site repo
+        uses: actions/checkout@v4
+        with:
+          repository: rishiraj824/rishiraj824.github.io
+          path: site
+          token: ${{ secrets.SITE_DEPLOY_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write credentials
+        run: |
+          echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > credentials.json
+          echo '${{ secrets.GOOGLE_TOKEN_JSON }}' > token.json
+
+      - name: Write .env
+        run: |
+          echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}" > .env
+          echo "GOOGLE_SHEETS_ID=${{ secrets.GOOGLE_SHEETS_ID }}" >> .env
+          echo "SITE_REPO_PATH=${{ github.workspace }}/site" >> .env
+
+      - name: Configure git for agent repo
+        run: |
+          git config user.name "email-agent[bot]"
+          git config user.email "email-agent@users.noreply.github.com"
+
+      - name: Configure git for site repo
+        working-directory: site
+        run: |
+          git config user.name "email-agent[bot]"
+          git config user.email "email-agent@users.noreply.github.com"
+
+      - name: Run agent
+        run: python agent.py --days 1
+
+      - name: Commit updated cache and token to agent repo
+        run: |
+          git add processed_cache.json token.json
+          git diff --staged --quiet || git commit -m "chore: update cache and token [skip ci]"
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

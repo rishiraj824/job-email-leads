@@ -59,7 +59,7 @@ SHEET_HEADERS = [
 ]
 
 FALLBACK_CSV = "fallback.csv"
-SITE_REPO = os.path.expanduser("~/rishiraj824.github.io")
+SITE_REPO = os.getenv("SITE_REPO_PATH", os.path.expanduser("~/rishiraj824.github.io"))
 SITE_JOBS_JSON = os.path.join(SITE_REPO, "assets", "jobs.json")
 CACHE_FILE = Path("processed_cache.json")
 
