@@ -76,6 +76,7 @@ jobs:
         env:
           SITE_DEPLOY_TOKEN: ${{ secrets.SITE_DEPLOY_TOKEN }}
         run: |
+          git config --unset-all http.https://github.com/.extraheader || true
           git remote set-url origin https://x-access-token:${SITE_DEPLOY_TOKEN}@github.com/rishiraj824/rishiraj824.github.io.git
           git add assets/jobs.json
           git diff --staged --quiet || git commit -m "Add job lead(s) [$(date +'%Y-%m-%d')]"
