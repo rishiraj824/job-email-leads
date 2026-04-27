@@ -73,14 +73,10 @@ jobs:
 
       - name: Commit and push site repo
         working-directory: site
-        env:
-          SITE_DEPLOY_TOKEN: ${{ secrets.SITE_DEPLOY_TOKEN }}
         run: |
-          git config --unset-all http.https://github.com/.extraheader || true
-          git remote set-url origin https://x-access-token:${SITE_DEPLOY_TOKEN}@github.com/rishiraj824/rishiraj824.github.io.git
           git add assets/jobs.json
           git diff --staged --quiet || git commit -m "Add job lead(s) [$(date +'%Y-%m-%d')]"
-          git push origin master
+          git -c "http.extraHeader=Authorization: Bearer ${{ secrets.SITE_DEPLOY_TOKEN }}" push origin master
 
       - name: Save refreshed token to cache
         uses: actions/cache/save@v4
