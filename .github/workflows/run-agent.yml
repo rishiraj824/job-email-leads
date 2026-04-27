@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '0 15 * * *'  # 8am PDT (UTC-7)
   workflow_dispatch:       # allow manual trigger from GitHub UI
+    inputs:
+      days:
+        description: 'Days back to fetch (default: 1)'
+        required: false
+        default: '1'
 
 jobs:
   run:
@@ -65,7 +70,7 @@ jobs:
           git remote set-url origin https://x-access-token:${{ secrets.SITE_DEPLOY_TOKEN }}@github.com/rishiraj824/rishiraj824.github.io.git
 
       - name: Run agent
-        run: python agent.py --days 1
+        run: python agent.py --days ${{ github.event.inputs.days || '1' }}
 
       - name: Save refreshed token to cache
         uses: actions/cache/save@v4
