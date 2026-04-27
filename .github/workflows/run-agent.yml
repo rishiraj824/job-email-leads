@@ -33,10 +33,18 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Restore cached token
+        uses: actions/cache@v4
+        with:
+          path: token.json
+          key: google-token
+
       - name: Write credentials
         run: |
           echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > credentials.json
-          echo '${{ secrets.GOOGLE_TOKEN_JSON }}' > token.json
+          if [ ! -f token.json ]; then
+            echo '${{ secrets.GOOGLE_TOKEN_JSON }}' > token.json
+          fi
 
       - name: Write .env
         run: |
@@ -58,11 +66,11 @@ jobs:
       - name: Run agent
         run: python agent.py --days 1
 
-      - name: Save refreshed token back to secret
-        run: |
-          gh secret set GOOGLE_TOKEN_JSON --repo rishiraj824/job-email-leads --body "$(cat token.json)"
-        env:
-          GH_TOKEN: ${{ secrets.SITE_DEPLOY_TOKEN }}
+      - name: Save refreshed token to cache
+        uses: actions/cache/save@v4
+        with:
+          path: token.json
+          key: google-token
 
       - name: Commit updated cache to agent repo
         run: |
