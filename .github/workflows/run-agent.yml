@@ -72,6 +72,13 @@ jobs:
       - name: Run agent
         run: python agent.py --days ${{ github.event.inputs.days || '1' }}
 
+      - name: Commit and push site repo
+        working-directory: site
+        run: |
+          git add assets/jobs.json
+          git diff --staged --quiet || git commit -m "Add job lead(s) [$(date +'%Y-%m-%d')]"
+          git push origin master
+
       - name: Save refreshed token to cache
         uses: actions/cache/save@v4
         with:

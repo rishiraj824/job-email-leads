@@ -15,7 +15,6 @@ import base64
 import json
 import logging
 import csv
-import subprocess
 import time
 from datetime import datetime, timedelta
 from email import message_from_bytes
@@ -455,17 +454,7 @@ def publish_to_site(new_jobs):
         "jobs": existing,
     }
     jobs_path.write_text(json.dumps(output, indent=2))
-    log.info("Publishing %d new jobs to site", len(added))
-    try:
-        subprocess.run(["git", "add", "assets/jobs.json"], cwd=SITE_REPO, check=True)
-        subprocess.run(
-            ["git", "commit", "-m", f"Add {len(added)} job lead(s) [{datetime.now().strftime('%Y-%m-%d')}]"],
-            cwd=SITE_REPO, check=True
-        )
-        subprocess.run(["git", "push", "origin", "master"], cwd=SITE_REPO, check=True)
-        log.info("Site updated and pushed")
-    except subprocess.CalledProcessError as e:
-        log.error("Git push to site failed: %s", e)
+    log.info("Wrote %d new jobs to site (git push handled by caller)", len(added))
 
 
 # --- Main ---
