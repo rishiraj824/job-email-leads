@@ -462,7 +462,7 @@ def publish_to_site(new_jobs):
         return
 
     output = {
-        "last_updated": datetime.now().strftime("%B %d, %Y at %I:%M %p"),
+        "last_updated": datetime.now(tz=__import__('zoneinfo').ZoneInfo("America/Los_Angeles")).strftime("%B %d, %Y at %I:%M %p %Z"),
         "jobs": existing,
     }
     jobs_path.write_text(json.dumps(output, indent=2))
