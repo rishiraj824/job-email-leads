@@ -38,18 +38,16 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Write credentials
+        run: |
+          echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > credentials.json
+          echo '${{ secrets.GOOGLE_TOKEN_JSON }}' > token.json
+
       - name: Restore cached token
         uses: actions/cache@v4
         with:
           path: token.json
           key: google-token
-
-      - name: Write credentials
-        run: |
-          echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > credentials.json
-          if [ ! -f token.json ]; then
-            echo '${{ secrets.GOOGLE_TOKEN_JSON }}' > token.json
-          fi
 
       - name: Write .env
         run: |
@@ -76,7 +74,7 @@ jobs:
         run: |
           git add assets/jobs.json
           git diff --staged --quiet || git commit -m "Add job lead(s) [$(date +'%Y-%m-%d')]"
-          git -c "http.extraHeader=Authorization: Bearer ${{ secrets.SITE_DEPLOY_TOKEN }}" push origin master
+          git push origin master
 
       - name: Save refreshed token to cache
         uses: actions/cache/save@v4

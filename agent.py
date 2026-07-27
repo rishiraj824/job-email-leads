@@ -246,6 +246,18 @@ Return only a JSON array of indices, e.g. [0, 3, 7]. No explanation."""
             indices = json.loads(resp.content[0].text.strip())
             return [metadata[i] for i in indices if 0 <= i < len(metadata)]
         except (json.JSONDecodeError, IndexError):
+            if attempt == 0:
+                # strip markdown fences and retry
+                raw = resp.content[0].text.strip()
+                if raw.startswith("```"):
+                    raw = raw.split("```")[1]
+                    if raw.startswith("json"):
+                        raw = raw[4:]
+                try:
+                    indices = json.loads(raw.strip())
+                    return [metadata[i] for i in indices if 0 <= i < len(metadata)]
+                except (json.JSONDecodeError, IndexError):
+                    pass
             log.error("Failed to parse subject filter response, using all")
             return metadata
         except anthropic.InternalServerError:
