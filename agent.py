@@ -453,23 +453,22 @@ def _parse_job_date(date_str):
 
 def publish_to_site(new_jobs):
     """Merge new jobs into assets/jobs.json in the Jekyll site and push."""
-    if not new_jobs:
-        return
     jobs_path = Path(SITE_JOBS_JSON)
     stored = json.loads(jobs_path.read_text()) if jobs_path.exists() else {}
     existing = stored.get("jobs", []) if isinstance(stored, dict) else stored
 
-    # deduplicate by company+role — keep first entry only, ignore follow-ups
-    seen_company_role = {(j.get("company"), j.get("role")) for j in existing}
     added = []
-    for job in new_jobs:
-        key = (job.get("company"), job.get("role"))
-        if key not in seen_company_role:
-            existing.insert(0, job)
-            seen_company_role.add(key)
-            added.append(job)
-        else:
-            log.info("Skipping follow-up for existing listing: %s - %s", job.get("company"), job.get("role"))
+    if new_jobs:
+        # deduplicate by company+role — keep first entry only, ignore follow-ups
+        seen_company_role = {(j.get("company"), j.get("role")) for j in existing}
+        for job in new_jobs:
+            key = (job.get("company"), job.get("role"))
+            if key not in seen_company_role:
+                existing.insert(0, job)
+                seen_company_role.add(key)
+                added.append(job)
+            else:
+                log.info("Skipping follow-up for existing listing: %s - %s", job.get("company"), job.get("role"))
 
     # drop jobs older than 30 days
     cutoff = datetime.now() - timedelta(days=30)
@@ -477,17 +476,14 @@ def publish_to_site(new_jobs):
     existing = [j for j in existing if _parse_job_date(j.get("date_received", "")) >= cutoff]
     dropped = before - len(existing)
     if dropped:
-        log.info("Removed %d jobs older than 90 days", dropped)
-
-    if not added and not dropped:
-        return
+        log.info("Removed %d jobs older than 30 days", dropped)
 
     output = {
         "last_updated": datetime.now(tz=__import__('zoneinfo').ZoneInfo("America/Los_Angeles")).strftime("%B %d, %Y at %I:%M %p %Z"),
         "jobs": existing,
     }
     jobs_path.write_text(json.dumps(output, indent=2))
-    log.info("Wrote %d new jobs to site (git push handled by caller)", len(added))
+    log.info("Wrote site jobs.json: %d new, %d dropped, %d total", len(added), dropped, len(existing))
 
 
 # --- Main ---
