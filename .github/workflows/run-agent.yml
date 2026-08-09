@@ -47,7 +47,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: token.json
-          key: google-token
+          key: google-token-${{ github.run_id }}
+          restore-keys: |
+            google-token-
 
       - name: Write .env
         run: |
@@ -80,7 +82,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: token.json
-          key: google-token
+          key: google-token-${{ github.run_id }}
 
       - name: Commit updated cache to agent repo
         run: |

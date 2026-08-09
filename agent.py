@@ -110,37 +110,58 @@ def fetch_message_metadata(service, days=1):
     log.info("%d messages not yet in cache", len(messages))
 
     metadata = []
-    # batch in chunks of 100 (Gmail batch limit)
-    for i in range(0, len(messages), 100):
-        chunk = messages[i:i + 100]
-        batch = service.new_batch_http_request()
-        results = {}
+    # batch in chunks of 50 to stay under Gmail's concurrent request limit
+    for i in range(0, len(messages), 50):
+        chunk = messages[i:i + 50]
+        failed_ids = []
 
-        def make_callback(msg_id):
-            def callback(request_id, response, exception):
-                if exception:
-                    log.warning("Batch metadata error for %s: %s", msg_id, exception)
-                    return
-                headers = {h["name"]: h["value"] for h in response.get("payload", {}).get("headers", [])}
-                results[msg_id] = {
-                    "id": msg_id,
-                    "thread_id": response.get("threadId"),
-                    "subject": headers.get("Subject", "(no subject)"),
-                    "sender": headers.get("From", ""),
-                    "date": headers.get("Date", ""),
-                }
-            return callback
+        def _fetch_batch(msgs, attempt=0):
+            batch = service.new_batch_http_request()
+            results = {}
+            rate_limited = []
 
-        for msg in chunk:
-            batch.add(
-                service.users().messages().get(
-                    userId="me", id=msg["id"], format="metadata",
-                    metadataHeaders=["Subject", "From", "Date"]
-                ),
-                callback=make_callback(msg["id"])
-            )
-        batch.execute()
+            def make_callback(msg_id):
+                def callback(request_id, response, exception):
+                    if exception:
+                        status = getattr(exception, "status_code", None) or getattr(exception, "resp", {}).get("status")
+                        if str(status) == "429":
+                            rate_limited.append(msg_id)
+                        else:
+                            log.warning("Batch metadata error for %s: %s", msg_id, exception)
+                        return
+                    headers = {h["name"]: h["value"] for h in response.get("payload", {}).get("headers", [])}
+                    results[msg_id] = {
+                        "id": msg_id,
+                        "thread_id": response.get("threadId"),
+                        "subject": headers.get("Subject", "(no subject)"),
+                        "sender": headers.get("From", ""),
+                        "date": headers.get("Date", ""),
+                    }
+                return callback
+
+            for msg in msgs:
+                msg_id = msg["id"] if isinstance(msg, dict) else msg
+                batch.add(
+                    service.users().messages().get(
+                        userId="me", id=msg_id, format="metadata",
+                        metadataHeaders=["Subject", "From", "Date"]
+                    ),
+                    callback=make_callback(msg_id)
+                )
+            batch.execute()
+
+            if rate_limited and attempt < 5:
+                wait = 2 ** attempt
+                log.warning("%d messages rate-limited, retrying in %ds (attempt %d)...", len(rate_limited), wait, attempt + 1)
+                time.sleep(wait)
+                results.update(_fetch_batch(rate_limited, attempt + 1))
+
+            return results
+
+        results = _fetch_batch(chunk)
         metadata.extend(results.values())
+        if i + 50 < len(messages):
+            time.sleep(0.5)  # small pause between chunks to avoid burst
     return metadata
 
 
