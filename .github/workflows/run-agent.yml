@@ -43,14 +43,6 @@ jobs:
           echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > credentials.json
           echo '${{ secrets.GOOGLE_TOKEN_JSON }}' > token.json
 
-      - name: Restore cached token
-        uses: actions/cache@v4
-        with:
-          path: token.json
-          key: google-token-${{ github.run_id }}
-          restore-keys: |
-            google-token-
-
       - name: Write .env
         run: |
           echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}" > .env
@@ -77,12 +69,6 @@ jobs:
           git add assets/jobs.json
           git diff --staged --quiet || git commit -m "Add job lead(s) [$(date +'%Y-%m-%d')]"
           git push origin master
-
-      - name: Save refreshed token to cache
-        uses: actions/cache/save@v4
-        with:
-          path: token.json
-          key: google-token-${{ github.run_id }}
 
       - name: Commit updated cache to agent repo
         run: |

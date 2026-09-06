@@ -113,7 +113,6 @@ def fetch_message_metadata(service, days=1):
     # batch in chunks of 50 to stay under Gmail's concurrent request limit
     for i in range(0, len(messages), 50):
         chunk = messages[i:i + 50]
-        failed_ids = []
 
         def _fetch_batch(msgs, attempt=0):
             batch = service.new_batch_http_request()
@@ -150,11 +149,14 @@ def fetch_message_metadata(service, days=1):
                 )
             batch.execute()
 
-            if rate_limited and attempt < 5:
-                wait = 2 ** attempt
-                log.warning("%d messages rate-limited, retrying in %ds (attempt %d)...", len(rate_limited), wait, attempt + 1)
-                time.sleep(wait)
-                results.update(_fetch_batch(rate_limited, attempt + 1))
+            if rate_limited:
+                if attempt < 5:
+                    wait = 2 ** attempt
+                    log.warning("%d messages rate-limited, retrying in %ds (attempt %d)...", len(rate_limited), wait, attempt + 1)
+                    time.sleep(wait)
+                    results.update(_fetch_batch(rate_limited, attempt + 1))
+                else:
+                    log.error("%d messages dropped after 5 retries: %s", len(rate_limited), rate_limited)
 
             return results
 
